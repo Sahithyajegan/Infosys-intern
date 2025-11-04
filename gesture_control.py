@@ -11,6 +11,10 @@ import sqlite3
 from PIL import Image, ImageTk
 import threading
 import time
+from collections import deque
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import comtypes
 
 # Database Setup
 def init_database():
@@ -61,27 +65,43 @@ class GestureControlApp:
         ctk.set_default_color_theme("blue")
         
         self.root = ctk.CTk()
-        self.root.geometry("1200x800")
+        self.root.geometry("1400x900")
         self.root.title("Gesture Volume Control System")
         
         # Variables for gesture control
         self.is_running = False
         self.current_user = None
+        self.current_frame = None
         
-        # Performance metrics
-        self.metrics = {
+        # Color scheme
+        self.primary_color = "#6161FC"  # RGB(97, 97, 252)
+        self.primary_dark = "#4A4AC9"   # Darker shade for hover
+        self.primary_light = "#7B7BFF"  # Lighter shade
+        
+        # Shared data updated by gesture thread
+        self.shared_data = {
+            'volume_percent': 0,
+            'finger_distance': 0,
+            'gesture_name': 'No Hand',
+            'gesture_color': '#999999',
             'accuracy': 0,
             'response_time': 0,
-            'finger_distance': 0,
-            'current_volume': 0
+            'fingers_extended': 0
         }
         
-        # Graph data for volume history
-        self.volume_history = []
-        self.max_history_points = 50  # Keep last 50 data points
+        # Graph data using deque for better performance
+        self.volume_history = deque(maxlen=100)
+        self.response_time_history = deque(maxlen=100)
+        self.accuracy_history = deque(maxlen=100)
         
-        # Flag to track if graph updates are active
-        self.graph_update_active = False
+        # Volume control parameters
+        self.vol_min = -65.25
+        self.vol_max = 0.0
+        
+        # Gesture state management
+        self.current_gesture = "none"
+        self.previous_volume = 0
+        self.smoothing_factor = 0.3  # Smooth volume transitions
         
         # Create frames
         self.create_login_frame()
@@ -95,15 +115,13 @@ class GestureControlApp:
     
     def create_login_frame(self):
         """Create the login interface"""
-        self.login_frame = ctk.CTkFrame(self.root, fg_color="#1a1a1a")
+        self.login_frame = ctk.CTkFrame(self.root, fg_color="#6161FC")
         
-        # Center container
         login_center = ctk.CTkFrame(self.login_frame, fg_color="white", 
                                    width=500, height=550, corner_radius=15)
         login_center.place(relx=0.5, rely=0.5, anchor="center")
         login_center.pack_propagate(False)
         
-        # Welcome message
         ctk.CTkLabel(login_center, 
                     text="Gesture Volume Control",
                     font=ctk.CTkFont(size=32, weight="bold"),
@@ -114,14 +132,12 @@ class GestureControlApp:
                     font=ctk.CTkFont(size=14),
                     text_color="#666666").pack(pady=(0, 40))
         
-        # Username entry
         self.username_entry = ctk.CTkEntry(login_center, width=380, height=50, 
                                           placeholder_text="Username",
                                           font=ctk.CTkFont(size=14),
                                           corner_radius=10)
         self.username_entry.pack(pady=12)
         
-        # Password entry
         self.password_entry = ctk.CTkEntry(login_center, width=380, height=50, 
                                           placeholder_text="Password",
                                           show="●",
@@ -129,19 +145,16 @@ class GestureControlApp:
                                           corner_radius=10)
         self.password_entry.pack(pady=12)
         
-        # Remember me checkbox
         ctk.CTkCheckBox(login_center, text="Remember me",
                        font=ctk.CTkFont(size=12)).pack(pady=10, padx=60, anchor="w")
         
-        # Login button
         ctk.CTkButton(login_center, text="Login", width=380, height=50,
                      command=self.login,
-                     fg_color="#FF5722",
-                     hover_color="#E64A19",
+                     fg_color=self.primary_color,
+                     hover_color=self.primary_dark,
                      font=ctk.CTkFont(size=16, weight="bold"),
                      corner_radius=10).pack(pady=20)
         
-        # Register link
         register_frame = ctk.CTkFrame(login_center, fg_color="white")
         register_frame.pack(pady=15)
         
@@ -150,7 +163,7 @@ class GestureControlApp:
                     font=ctk.CTkFont(size=13)).pack(side="left")
         
         register_btn = ctk.CTkLabel(register_frame, text="Register",
-                                   text_color="#2196F3",
+                                   text_color=self.primary_color,
                                    font=ctk.CTkFont(size=13, weight="bold"),
                                    cursor="hand2")
         register_btn.pack(side="left", padx=(5, 0))
@@ -160,13 +173,11 @@ class GestureControlApp:
         """Create the registration interface"""
         self.register_frame = ctk.CTkFrame(self.root, fg_color="#1a1a1a")
         
-        # Center container
         register_center = ctk.CTkFrame(self.register_frame, fg_color="white", 
                                       width=500, height=550, corner_radius=15)
         register_center.place(relx=0.5, rely=0.5, anchor="center")
         register_center.pack_propagate(False)
         
-        # Title
         ctk.CTkLabel(register_center, 
                     text="Create Account",
                     font=ctk.CTkFont(size=32, weight="bold"),
@@ -177,14 +188,12 @@ class GestureControlApp:
                     font=ctk.CTkFont(size=14),
                     text_color="#666666").pack(pady=(0, 40))
         
-        # Username entry
         self.reg_username = ctk.CTkEntry(register_center, width=380, height=50, 
                                         placeholder_text="Username",
                                         font=ctk.CTkFont(size=14),
                                         corner_radius=10)
         self.reg_username.pack(pady=12)
         
-        # Password entry
         self.reg_password = ctk.CTkEntry(register_center, width=380, height=50, 
                                         placeholder_text="Password",
                                         show="●",
@@ -192,7 +201,6 @@ class GestureControlApp:
                                         corner_radius=10)
         self.reg_password.pack(pady=12)
         
-        # Confirm password entry
         self.reg_confirm_password = ctk.CTkEntry(register_center, width=380, height=50, 
                                                 placeholder_text="Confirm Password",
                                                 show="●",
@@ -200,28 +208,26 @@ class GestureControlApp:
                                                 corner_radius=10)
         self.reg_confirm_password.pack(pady=12)
         
-        # Register button
         ctk.CTkButton(register_center, text="Register", width=380, height=50,
                      command=self.register,
-                     fg_color="#4CAF50",
-                     hover_color="#45a049",
+                     fg_color=self.primary_color,
+                     hover_color=self.primary_dark,
                      font=ctk.CTkFont(size=16, weight="bold"),
                      corner_radius=10).pack(pady=20)
         
-        # Back to login link
         back_btn = ctk.CTkLabel(register_center, text="← Back to Login",
-                               text_color="#2196F3",
+                               text_color=self.primary_color,
                                font=ctk.CTkFont(size=13, weight="bold"),
                                cursor="hand2")
         back_btn.pack(pady=15)
         back_btn.bind("<Button-1>", lambda e: self.show_login())
     
     def create_dashboard_frame(self):
-        """Create the main dashboard interface"""
+        """Create the main dashboard interface with tabs"""
         self.dashboard_frame = ctk.CTkFrame(self.root, fg_color="#f5f5f5")
         
         # Header
-        header = ctk.CTkFrame(self.dashboard_frame, fg_color="#FF5722", height=80)
+        header = ctk.CTkFrame(self.dashboard_frame, fg_color=self.primary_color, height=80)
         header.pack(fill="x", padx=0, pady=0)
         header.pack_propagate(False)
         
@@ -229,7 +235,7 @@ class GestureControlApp:
                     font=ctk.CTkFont(size=28, weight="bold"),
                     text_color="white").pack(side="left", padx=30, pady=20)
         
-        # Control buttons in header
+        # Control buttons
         button_frame = ctk.CTkFrame(header, fg_color="transparent")
         button_frame.pack(side="right", padx=30)
         
@@ -242,157 +248,288 @@ class GestureControlApp:
         
         self.pause_btn = ctk.CTkButton(button_frame, text="⏸ Pause", width=100, height=35,
                                        command=self.pause_gesture_control,
-                                       fg_color="#FF9800",
-                                       hover_color="#F57C00",
+                                       fg_color=self.primary_color,
+                                       hover_color=self.primary_dark,
                                        corner_radius=8,
                                        state="disabled")
         self.pause_btn.pack(side="left", padx=5)
         
-        # Add a test button to manually test the graph
-        ctk.CTkButton(button_frame, text="📊 Test Graph", width=100, height=35,
-                     command=self.test_graph,
-                     fg_color="#9C27B0",
-                     hover_color="#7B1FA2",
-                     corner_radius=8).pack(side="left", padx=5)
+        # Create tab view
+        self.tabview = ctk.CTkTabview(self.dashboard_frame, 
+                                     fg_color="#f5f5f5",
+                                     segmented_button_fg_color=self.primary_color,
+                                     segmented_button_selected_color=self.primary_dark,
+                                     segmented_button_unselected_color=self.primary_color,
+                                     segmented_button_unselected_hover_color=self.primary_dark)
+        self.tabview.pack(fill="both", expand=True, padx=20, pady=20)
         
-        ctk.CTkButton(button_frame, text="⚙ Settings", width=100, height=35,
-                     fg_color="#607D8B",
-                     hover_color="#546E7A",
-                     corner_radius=8).pack(side="left", padx=5)
+        # Create tabs
+        self.live_tab = self.tabview.add("🎥 Live Control")
+        self.analytics_tab = self.tabview.add("📊 Analytics")
         
-        # Main content area
-        content = ctk.CTkFrame(self.dashboard_frame, fg_color="#f5f5f5")
-        content.pack(fill="both", expand=True, padx=20, pady=20)
+        # Configure tabs to expand
+        self.live_tab.grid_columnconfigure(0, weight=1)
+        self.live_tab.grid_rowconfigure(1, weight=1)
+        self.analytics_tab.grid_columnconfigure(0, weight=1)
+        self.analytics_tab.grid_rowconfigure(0, weight=1)
         
-        # Left side - Live Gesture Control
+        # Setup Live Control Tab
+        self.setup_live_control_tab()
+        
+        # Setup Analytics Tab
+        self.setup_analytics_tab()
+    
+    def setup_live_control_tab(self):
+        """Setup the live control tab content"""
+        # Main content for live control
+        content = ctk.CTkFrame(self.live_tab, fg_color="#f5f5f5")
+        content.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Configure grid
+        content.grid_columnconfigure(0, weight=3)  # Left panel (video)
+        content.grid_columnconfigure(1, weight=1)  # Right panel (controls)
+        content.grid_rowconfigure(0, weight=1)
+        
+        # LEFT PANEL - Video
         left_panel = ctk.CTkFrame(content, fg_color="white", corner_radius=15)
-        left_panel.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         
-        ctk.CTkLabel(left_panel, text="🎥 Live Gesture Control",
+        # Left panel grid configuration
+        left_panel.grid_rowconfigure(0, weight=0)  # Title
+        left_panel.grid_rowconfigure(1, weight=1)  # Video (gets all space)
+        left_panel.grid_rowconfigure(2, weight=0)  # Gesture status
+        left_panel.grid_columnconfigure(0, weight=1)
+        
+        # Title
+        ctk.CTkLabel(left_panel, text="🎥 Live Camera Feed",
                     font=ctk.CTkFont(size=18, weight="bold"),
-                    text_color="#333333").pack(pady=15, padx=20, anchor="w")
+                    text_color="#333333").grid(row=0, column=0, sticky="w", padx=20, pady=15)
         
-        # Video display area
-        self.video_label = ctk.CTkLabel(left_panel, text="", fg_color="#e0e0e0")
-        self.video_label.pack(padx=20, pady=(0, 20), fill="both", expand=True)
+        # Video display - Centered with proper sizing
+        video_container = ctk.CTkFrame(left_panel, fg_color="transparent")
+        video_container.grid(row=1, column=0, sticky="nsew", padx=20, pady=10)
+        video_container.grid_rowconfigure(0, weight=1)
+        video_container.grid_columnconfigure(0, weight=1)
         
-        # Gesture status
+        self.video_label = ctk.CTkLabel(video_container, 
+                                       text="Camera will appear here\n\nClick 'Start' to begin gesture control",
+                                       fg_color="#e0e0e0",
+                                       width=640, 
+                                       height=480,
+                                       font=ctk.CTkFont(size=14),
+                                       text_color="#666666",
+                                       corner_radius=10)
+        self.video_label.grid(row=0, column=0)
+        
+        # Gesture status badge
         self.gesture_status = ctk.CTkLabel(left_panel, 
-                                          text="Pinch Gesture",
-                                          font=ctk.CTkFont(size=14),
+                                          text="No Hand Detected",
+                                          font=ctk.CTkFont(size=14, weight="bold"),
                                           text_color="white",
-                                          fg_color="#FF5722",
+                                          fg_color="#999999",
                                           corner_radius=8,
-                                          width=150,
-                                          height=35)
-        self.gesture_status.pack(pady=(0, 15))
+                                          width=180,
+                                          height=40)
+        self.gesture_status.grid(row=2, column=0, pady=15)
         
-        # Add graph canvas below video
-        graph_frame = ctk.CTkFrame(left_panel, fg_color="#f5f5f5", corner_radius=10, height=150)
-        graph_frame.pack(padx=20, pady=(0, 20), fill="x")
-        graph_frame.pack_propagate(False)
-        
-        ctk.CTkLabel(graph_frame, text="📈 Volume History",
-                    font=ctk.CTkFont(size=14, weight="bold"),
-                    text_color="#333333").pack(pady=(10, 5), padx=15, anchor="w")
-        
-        # Add status label for graph debugging
-        self.graph_status_label = ctk.CTkLabel(graph_frame, 
-                                               text="Ready - waiting for data",
-                                               font=ctk.CTkFont(size=10),
-                                               text_color="#666666")
-        self.graph_status_label.pack(pady=(0, 5), padx=15, anchor="w")
-        
-        # Canvas for drawing the graph - give it a fixed size initially
-        from tkinter import Canvas
-        self.graph_canvas = Canvas(graph_frame, bg="white", highlightthickness=0, 
-                                   height=90, width=800)
-        self.graph_canvas.pack(fill="both", expand=True, padx=15, pady=(0, 10))
-        
-        # Force canvas to update and get proper dimensions
-        self.graph_canvas.update_idletasks()
-        
-        # Draw initial empty graph
-        self.root.after(100, self.draw_volume_graph)
-        
-        # Right side - Gesture Recognition & Metrics
-        right_panel = ctk.CTkFrame(content, fg_color="white", 
-                                  corner_radius=15, width=350)
-        right_panel.pack(side="right", fill="y", padx=(10, 0))
-        right_panel.pack_propagate(False)
+        # RIGHT PANEL - Recognition and Metrics
+        right_panel = ctk.CTkFrame(content, fg_color="white", corner_radius=15)
+        right_panel.grid(row=0, column=1, sticky="nsew")
         
         ctk.CTkLabel(right_panel, text="🎯 Gesture Recognition",
                     font=ctk.CTkFont(size=18, weight="bold"),
                     text_color="#333333").pack(pady=15, padx=20, anchor="w")
         
-        # Gesture status cards
-        self.create_gesture_card(right_panel, "Open Hand", "Distance > 100px", "Inactive", "#e0e0e0")
-        self.create_gesture_card(right_panel, "Pinch", "Distance < 60px", "Active", "#4CAF50")
-        self.create_gesture_card(right_panel, "Closed", "Distance < 30px", "Inactive", "#e0e0e0")
+        # Gesture cards container
+        self.gesture_cards_frame = ctk.CTkFrame(right_panel, fg_color="white")
+        self.gesture_cards_frame.pack(padx=20, fill="x")
         
-        # Performance Metrics section
+        # Create gesture status cards
+        self.gesture_cards = {}
+        gestures_info = [
+            ("Open Hand", "Distance > 100px", "open"),
+            ("Pinch", "Distance < 60px", "pinch"),
+            ("Closed", "Distance < 30px", "closed")
+        ]
+        
+        for name, desc, key in gestures_info:
+            card = self.create_gesture_card_widget(self.gesture_cards_frame, name, desc)
+            self.gesture_cards[key] = card
+            card.pack(pady=8, fill="x")
+        
+        # Performance Metrics
         ctk.CTkLabel(right_panel, text="📊 Performance Metrics",
                     font=ctk.CTkFont(size=18, weight="bold"),
-                    text_color="#333333").pack(pady=(20, 15), padx=20, anchor="w")
+                    text_color="#333333").pack(pady=(25, 15), padx=20, anchor="w")
         
-        # Metrics grid
         metrics_container = ctk.CTkFrame(right_panel, fg_color="white")
         metrics_container.pack(padx=20, pady=(0, 20), fill="x")
         
-        # Create metric displays
-        self.metric_labels = {}
+        # Create metric displays (2x2 grid)
+        self.metric_widgets = {}
         metrics_data = [
-            ("Current Volume", "current_volume", "%", "#FF5722"),
-            ("Finger Distance", "finger_distance", "mm", "#2196F3"),
+            ("Current Volume", "volume", "%", self.primary_color),
+            ("Finger Distance", "distance", "px", "#2196F3"),
             ("Accuracy", "accuracy", "%", "#4CAF50"),
-            ("Response Time", "response_time", "ms", "#FF9800")
+            ("Response Time", "time", "ms", self.primary_color)
         ]
         
         for i, (title, key, unit, color) in enumerate(metrics_data):
             row = i // 2
             col = i % 2
-            metric_frame = ctk.CTkFrame(metrics_container, fg_color="#f5f5f5", 
-                                       corner_radius=10, width=145, height=100)
-            metric_frame.grid(row=row, column=col, padx=5, pady=5, sticky="nsew")
-            metric_frame.grid_propagate(False)
             
-            value_label = ctk.CTkLabel(metric_frame, text="0" + unit,
-                                      font=ctk.CTkFont(size=24, weight="bold"),
+            metric_frame = ctk.CTkFrame(metrics_container, fg_color="#f5f5f5", 
+                                       corner_radius=10)
+            metric_frame.grid(row=row, column=col, padx=5, pady=5, sticky="nsew")
+            
+            # Configure grid weights for equal sizing
+            metrics_container.grid_rowconfigure(row, weight=1)
+            metrics_container.grid_columnconfigure(col, weight=1)
+            
+            value_label = ctk.CTkLabel(metric_frame, text=f"0{unit}",
+                                      font=ctk.CTkFont(size=26, weight="bold"),
                                       text_color=color)
-            value_label.pack(pady=(15, 5))
+            value_label.pack(pady=(20, 5))
             
             ctk.CTkLabel(metric_frame, text=title,
                         font=ctk.CTkFont(size=11),
-                        text_color="#666666").pack()
+                        text_color="#666666").pack(pady=(0, 20))
             
-            self.metric_labels[key] = value_label
+            self.metric_widgets[key] = value_label
     
-    def create_gesture_card(self, parent, gesture_name, distance_info, status, color):
-        """Create a gesture status card"""
-        card = ctk.CTkFrame(parent, fg_color="#f5f5f5", corner_radius=10, height=70)
-        card.pack(padx=20, pady=8, fill="x")
+    def setup_analytics_tab(self):
+        """Setup the analytics tab with graphs"""
+        # Main content for analytics
+        content = ctk.CTkFrame(self.analytics_tab, fg_color="#f5f5f5")
+        content.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Title
+        ctk.CTkLabel(content, text="📈 Performance Analytics",
+                    font=ctk.CTkFont(size=24, weight="bold"),
+                    text_color="#333333").pack(pady=(0, 20))
+        
+        # Create graph container with grid
+        graphs_container = ctk.CTkFrame(content, fg_color="white", corner_radius=15)
+        graphs_container.pack(fill="both", expand=True)
+        
+        # Configure grid for multiple graphs
+        graphs_container.grid_rowconfigure(0, weight=1)  # Volume graph
+        graphs_container.grid_rowconfigure(1, weight=1)  # Performance graphs
+        graphs_container.grid_columnconfigure(0, weight=1)
+        graphs_container.grid_columnconfigure(1, weight=1)
+        
+        # Volume History Graph (Full width)
+        volume_graph_frame = ctk.CTkFrame(graphs_container, fg_color="white", corner_radius=10)
+        volume_graph_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=15, pady=10)
+        volume_graph_frame.grid_rowconfigure(0, weight=0)  # Title
+        volume_graph_frame.grid_rowconfigure(1, weight=1)  # Graph
+        volume_graph_frame.grid_columnconfigure(0, weight=1)
+        
+        ctk.CTkLabel(volume_graph_frame, text="📊 Volume History",
+                    font=ctk.CTkFont(size=18, weight="bold"),
+                    text_color="#333333").grid(row=0, column=0, sticky="w", padx=20, pady=15)
+        
+        self.volume_graph_container = ctk.CTkFrame(volume_graph_frame, fg_color="white", height=300)
+        self.volume_graph_container.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 15))
+        self.volume_graph_container.grid_propagate(False)
+        
+        # Performance Graphs (2 columns)
+        # Response Time Graph
+        response_graph_frame = ctk.CTkFrame(graphs_container, fg_color="white", corner_radius=10)
+        response_graph_frame.grid(row=1, column=0, sticky="nsew", padx=(15, 7), pady=10)
+        response_graph_frame.grid_rowconfigure(0, weight=0)  # Title
+        response_graph_frame.grid_rowconfigure(1, weight=1)  # Graph
+        response_graph_frame.grid_columnconfigure(0, weight=1)
+        
+        ctk.CTkLabel(response_graph_frame, text="⏱️ Response Time",
+                    font=ctk.CTkFont(size=16, weight="bold"),
+                    text_color="#333333").grid(row=0, column=0, sticky="w", padx=20, pady=15)
+        
+        self.response_graph_container = ctk.CTkFrame(response_graph_frame, fg_color="white", height=250)
+        self.response_graph_container.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 15))
+        self.response_graph_container.grid_propagate(False)
+        
+        # Accuracy Graph
+        accuracy_graph_frame = ctk.CTkFrame(graphs_container, fg_color="white", corner_radius=10)
+        accuracy_graph_frame.grid(row=1, column=1, sticky="nsew", padx=(7, 15), pady=10)
+        accuracy_graph_frame.grid_rowconfigure(0, weight=0)  # Title
+        accuracy_graph_frame.grid_rowconfigure(1, weight=1)  # Graph
+        accuracy_graph_frame.grid_columnconfigure(0, weight=1)
+        
+        ctk.CTkLabel(accuracy_graph_frame, text="🎯 Detection Accuracy",
+                    font=ctk.CTkFont(size=16, weight="bold"),
+                    text_color="#333333").grid(row=0, column=0, sticky="w", padx=20, pady=15)
+        
+        self.accuracy_graph_container = ctk.CTkFrame(accuracy_graph_frame, fg_color="white", height=250)
+        self.accuracy_graph_container.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 15))
+        self.accuracy_graph_container.grid_propagate(False)
+        
+        # Statistics Panel
+        stats_frame = ctk.CTkFrame(content, fg_color="white", corner_radius=15, height=100)
+        stats_frame.pack(fill="x", pady=(10, 0))
+        stats_frame.pack_propagate(False)
+        
+        ctk.CTkLabel(stats_frame, text="📈 Session Statistics",
+                    font=ctk.CTkFont(size=16, weight="bold"),
+                    text_color="#333333").pack(anchor="w", padx=20, pady=15)
+        
+        stats_container = ctk.CTkFrame(stats_frame, fg_color="white")
+        stats_container.pack(fill="x", padx=20, pady=(0, 15))
+        
+        # Statistics labels
+        self.stats_widgets = {}
+        stats_data = [
+            ("Total Frames", "frames", "0", "#2196F3"),
+            ("Hand Detections", "detections", "0", "#4CAF50"),
+            ("Avg Response Time", "avg_response", "0ms", self.primary_color),
+            ("Peak Volume", "peak_volume", "0%", self.primary_color)
+        ]
+        
+        for i, (title, key, default, color) in enumerate(stats_data):
+            stat_frame = ctk.CTkFrame(stats_container, fg_color="#f5f5f5", corner_radius=8)
+            stat_frame.pack(side="left", fill="x", expand=True, padx=5)
+            
+            value_label = ctk.CTkLabel(stat_frame, text=default,
+                                      font=ctk.CTkFont(size=20, weight="bold"),
+                                      text_color=color)
+            value_label.pack(pady=(10, 5))
+            
+            ctk.CTkLabel(stat_frame, text=title,
+                        font=ctk.CTkFont(size=11),
+                        text_color="#666666").pack(pady=(0, 10))
+            
+            self.stats_widgets[key] = value_label
+    
+    def create_gesture_card_widget(self, parent, name, description):
+        """Create a gesture status card widget"""
+        card = ctk.CTkFrame(parent, fg_color="#f5f5f5", corner_radius=10, height=75)
         card.pack_propagate(False)
         
-        # Status indicator
-        indicator = ctk.CTkFrame(card, fg_color=color, width=8, corner_radius=4)
-        indicator.pack(side="left", fill="y", padx=(10, 15), pady=10)
+        # Status indicator (changes color when active)
+        card.indicator = ctk.CTkFrame(card, fg_color="#d0d0d0", width=8, corner_radius=4)
+        card.indicator.pack(side="left", fill="y", padx=(12, 15), pady=12)
         
         # Text content
         text_frame = ctk.CTkFrame(card, fg_color="transparent")
-        text_frame.pack(side="left", fill="both", expand=True)
+        text_frame.pack(side="left", fill="both", expand=True, pady=10)
         
-        ctk.CTkLabel(text_frame, text=gesture_name,
-                    font=ctk.CTkFont(size=14, weight="bold"),
-                    text_color="#333333").pack(anchor="w", pady=(8, 2))
+        card.name_label = ctk.CTkLabel(text_frame, text=name,
+                                       font=ctk.CTkFont(size=15, weight="bold"),
+                                       text_color="#333333")
+        card.name_label.pack(anchor="w", pady=(5, 2))
         
-        ctk.CTkLabel(text_frame, text=distance_info,
-                    font=ctk.CTkFont(size=11),
-                    text_color="#666666").pack(anchor="w")
+        card.desc_label = ctk.CTkLabel(text_frame, text=description,
+                                       font=ctk.CTkFont(size=11),
+                                       text_color="#666666")
+        card.desc_label.pack(anchor="w")
         
         # Status label
-        ctk.CTkLabel(card, text=status,
-                    font=ctk.CTkFont(size=11, weight="bold"),
-                    text_color="#666666").pack(side="right", padx=15)
+        card.status_label = ctk.CTkLabel(card, text="Inactive",
+                                        font=ctk.CTkFont(size=12, weight="bold"),
+                                        text_color="#999999")
+        card.status_label.pack(side="right", padx=15)
+        
+        return card
     
     def show_login(self):
         """Display login frame"""
@@ -411,6 +548,8 @@ class GestureControlApp:
         self.login_frame.pack_forget()
         self.register_frame.pack_forget()
         self.dashboard_frame.pack(fill="both", expand=True)
+        # Initialize matplotlib graphs after UI is rendered
+        self.root.after(1000, self.init_matplotlib_graphs)
     
     def login(self):
         """Handle user login"""
@@ -453,80 +592,307 @@ class GestureControlApp:
             messagebox.showerror("Error", "Username already exists.")
     
     def start_gesture_control(self):
-        """Start the gesture control system"""
+        """Start gesture control"""
         if not self.is_running:
             self.is_running = True
             self.start_btn.configure(state="disabled")
             self.pause_btn.configure(state="normal")
             
-            # Start the graph update timer in the main thread
-            if not self.graph_update_active:
-                self.graph_update_active = True
-                self.update_graph_periodically()
+            # Reset gesture state
+            self.current_gesture = "none"
+            self.previous_volume = 0
             
-            # Start gesture detection in a separate thread
-            self.detection_thread = threading.Thread(target=self.run_gesture_detection, daemon=True)
-            self.detection_thread.start()
-    
-    def update_graph_periodically(self):
-        """Update the graph periodically from the main thread"""
-        if self.graph_update_active:
-            # Update the graph if we have data
-            if len(self.volume_history) > 0:
-                self.draw_volume_graph()
-                # Update status label
-                self.graph_status_label.configure(
-                    text=f"Data points: {len(self.volume_history)} | Active"
-                )
+            # Start gesture detection thread
+            threading.Thread(target=self.run_gesture_detection, daemon=True).start()
             
-            # Schedule the next update in 100ms (10 times per second)
-            self.root.after(100, self.update_graph_periodically)
+            # Start UI update loop
+            self.update_ui()
     
     def pause_gesture_control(self):
-        """Pause the gesture control system"""
+        """Pause gesture control"""
         self.is_running = False
-        self.graph_update_active = False
         self.start_btn.configure(state="normal")
         self.pause_btn.configure(state="disabled")
-        self.graph_status_label.configure(text="Paused")
     
-    def test_graph(self):
-        """Test function to add sample data to the graph"""
-        import random
-        # Add 20 random volume values to test the graph
-        for i in range(20):
-            random_volume = random.randint(20, 90)
-            self.volume_history.append(random_volume)
-            if len(self.volume_history) > self.max_history_points:
-                self.volume_history.pop(0)
+    def init_matplotlib_graphs(self):
+        """Initialize all Matplotlib graphs"""
+        self.init_volume_graph()
+        self.init_performance_graphs()
+    
+    def init_volume_graph(self):
+        """Initialize the main volume history graph"""
+        try:
+            for widget in self.volume_graph_container.winfo_children():
+                widget.destroy()
+            
+            self.volume_fig = Figure(figsize=(10, 3), dpi=100)
+            self.volume_ax = self.volume_fig.add_subplot(111)
+            self.volume_ax.set_facecolor("white")
+            self.volume_fig.patch.set_facecolor("white")
+            
+            # Style the volume graph with new color scheme
+            self.volume_ax.set_xlim(0, 100)
+            self.volume_ax.set_ylim(0, 100)
+            self.volume_ax.grid(True, color="#e8e8e8", linewidth=0.5)
+            self.volume_ax.set_xlabel("Time (frames)", fontsize=10, color="#888888")
+            self.volume_ax.set_ylabel("Volume %", fontsize=10, color="#888888")
+            self.volume_ax.tick_params(axis='both', colors='#888888', labelsize=9)
+            self.volume_ax.set_title("Real-time Volume Control", fontsize=12, color="#333333", pad=10)
+            
+            # Embed into Tkinter
+            self.volume_canvas = FigureCanvasTkAgg(self.volume_fig, master=self.volume_graph_container)
+            self.volume_canvas.draw()
+            self.volume_canvas.get_tk_widget().pack(fill="both", expand=True)
+            
+        except Exception as e:
+            print(f"Volume graph initialization error: {e}")
+    
+    def init_performance_graphs(self):
+        """Initialize response time and accuracy graphs"""
+        try:
+            # Response Time Graph
+            for widget in self.response_graph_container.winfo_children():
+                widget.destroy()
+            
+            self.response_fig = Figure(figsize=(5, 2.5), dpi=100)
+            self.response_ax = self.response_fig.add_subplot(111)
+            self.response_ax.set_facecolor("white")
+            self.response_fig.patch.set_facecolor("white")
+            
+            self.response_ax.set_xlim(0, 100)
+            self.response_ax.set_ylim(0, 100)
+            self.response_ax.grid(True, color="#e8e8e8", linewidth=0.5)
+            self.response_ax.set_xlabel("Time", fontsize=8, color="#888888")
+            self.response_ax.set_ylabel("Response Time (ms)", fontsize=8, color="#888888")
+            self.response_ax.tick_params(axis='both', colors='#888888', labelsize=7)
+            
+            self.response_canvas = FigureCanvasTkAgg(self.response_fig, master=self.response_graph_container)
+            self.response_canvas.draw()
+            self.response_canvas.get_tk_widget().pack(fill="both", expand=True)
+            
+            # Accuracy Graph
+            for widget in self.accuracy_graph_container.winfo_children():
+                widget.destroy()
+            
+            self.accuracy_fig = Figure(figsize=(5, 2.5), dpi=100)
+            self.accuracy_ax = self.accuracy_fig.add_subplot(111)
+            self.accuracy_ax.set_facecolor("white")
+            self.accuracy_fig.patch.set_facecolor("white")
+            
+            self.accuracy_ax.set_xlim(0, 100)
+            self.accuracy_ax.set_ylim(0, 100)
+            self.accuracy_ax.grid(True, color="#e8e8e8", linewidth=0.5)
+            self.accuracy_ax.set_xlabel("Time", fontsize=8, color="#888888")
+            self.accuracy_ax.set_ylabel("Accuracy %", fontsize=8, color="#888888")
+            self.accuracy_ax.tick_params(axis='both', colors='#888888', labelsize=7)
+            
+            self.accuracy_canvas = FigureCanvasTkAgg(self.accuracy_fig, master=self.accuracy_graph_container)
+            self.accuracy_canvas.draw()
+            self.accuracy_canvas.get_tk_widget().pack(fill="both", expand=True)
+            
+        except Exception as e:
+            print(f"Performance graphs initialization error: {e}")
+    
+    def draw_volume_graph(self):
+        """Update volume history graph with new color scheme"""
+        try:
+            if not hasattr(self, "volume_ax"):
+                return
+            
+            data = list(self.volume_history)
+            n = len(data)
+            
+            self.volume_ax.clear()
+            self.volume_ax.set_facecolor("white")
+            self.volume_ax.grid(True, color="#e8e8e8", linewidth=0.5)
+            self.volume_ax.set_xlabel("Time (frames)", fontsize=10, color="#888888")
+            self.volume_ax.set_ylabel("Volume %", fontsize=10, color="#888888")
+            self.volume_ax.tick_params(axis='both', colors='#888888', labelsize=9)
+            self.volume_ax.set_title("Real-time Volume Control", fontsize=12, color="#333333", pad=10)
+            
+            if n == 0:
+                self.volume_ax.text(0.5, 0.5, "Waiting for gesture data...",
+                                   ha="center", va="center", color="#aaaaaa",
+                                   fontsize=14, transform=self.volume_ax.transAxes)
+                self.volume_ax.set_xlim(0, 100)
+                self.volume_ax.set_ylim(0, 100)
+            else:
+                x = list(range(n))
+                y = [max(0, min(100, float(v))) for v in data]
+                
+                self.volume_ax.set_xlim(0, max(100, n))
+                self.volume_ax.set_ylim(0, 100)
+                
+                # Fill area under curve with new color
+                self.volume_ax.fill_between(x, y, color="#E0E0FF", alpha=0.6)  # Light blue fill
+                
+                # Plot the line with new color
+                self.volume_ax.plot(x, y, color=self.primary_color, linewidth=2.5)
+                
+                # Highlight current value with new color
+                if y:
+                    self.volume_ax.scatter(x[-1], y[-1], color=self.primary_color, s=60,
+                                          edgecolor="white", linewidth=2, zorder=5)
+                    self.volume_ax.text(x[-1], min(95, y[-1] + 5), f"{int(y[-1])}%",
+                                       color=self.primary_color, fontsize=11, ha="center", 
+                                       va="bottom", weight="bold")
+            
+            self.volume_fig.tight_layout()
+            self.volume_canvas.draw_idle()
+            
+        except Exception as e:
+            print(f"Volume graph drawing error: {e}")
+    
+    def draw_performance_graphs(self):
+        """Update response time and accuracy graphs with new color scheme"""
+        try:
+            # Update response time graph
+            if hasattr(self, "response_ax") and len(self.response_time_history) > 0:
+                self.response_ax.clear()
+                self.response_ax.set_facecolor("white")
+                self.response_ax.grid(True, color="#e8e8e8", linewidth=0.5)
+                self.response_ax.set_xlabel("Time", fontsize=8, color="#888888")
+                self.response_ax.set_ylabel("Response Time (ms)", fontsize=8, color="#888888")
+                self.response_ax.tick_params(axis='both', colors='#888888', labelsize=7)
+                
+                response_data = list(self.response_time_history)
+                x = list(range(len(response_data)))
+                self.response_ax.plot(x, response_data, color=self.primary_color, linewidth=2.0)
+                self.response_ax.fill_between(x, response_data, color="#E0E0FF", alpha=0.6)
+                self.response_ax.set_ylim(0, max(100, max(response_data) if response_data else 100))
+                self.response_ax.set_xlim(0, max(100, len(response_data)))
+                
+                self.response_fig.tight_layout()
+                self.response_canvas.draw_idle()
+            
+            # Update accuracy graph
+            if hasattr(self, "accuracy_ax") and len(self.accuracy_history) > 0:
+                self.accuracy_ax.clear()
+                self.accuracy_ax.set_facecolor("white")
+                self.accuracy_ax.grid(True, color="#e8e8e8", linewidth=0.5)
+                self.accuracy_ax.set_xlabel("Time", fontsize=8, color="#888888")
+                self.accuracy_ax.set_ylabel("Accuracy %", fontsize=8, color="#888888")
+                self.accuracy_ax.tick_params(axis='both', colors='#888888', labelsize=7)
+                
+                accuracy_data = list(self.accuracy_history)
+                x = list(range(len(accuracy_data)))
+                self.accuracy_ax.plot(x, accuracy_data, color="#4CAF50", linewidth=2.0)
+                self.accuracy_ax.fill_between(x, accuracy_data, color="#C8E6C9", alpha=0.6)
+                self.accuracy_ax.set_ylim(0, 100)
+                self.accuracy_ax.set_xlim(0, max(100, len(accuracy_data)))
+                
+                self.accuracy_fig.tight_layout()
+                self.accuracy_canvas.draw_idle()
+                
+        except Exception as e:
+            print(f"Performance graphs drawing error: {e}")
+    
+    def update_statistics(self, frame_count, successful_detections):
+        """Update session statistics"""
+        try:
+            if frame_count > 0:
+                avg_response = sum(self.response_time_history) / len(self.response_time_history) if self.response_time_history else 0
+                peak_volume = max(self.volume_history) if self.volume_history else 0
+                
+                self.stats_widgets['frames'].configure(text=str(frame_count))
+                self.stats_widgets['detections'].configure(text=str(successful_detections))
+                self.stats_widgets['avg_response'].configure(text=f"{avg_response:.1f}ms")
+                self.stats_widgets['peak_volume'].configure(text=f"{peak_volume}%")
+        except Exception as e:
+            print(f"Statistics update error: {e}")
+    
+    def update_ui(self):
+        """Periodic UI update from main thread"""
+        if self.is_running:
+            # Update video frame
+            if self.current_frame is not None:
+                try:
+                    frame_rgb = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
+                    img = Image.fromarray(frame_rgb)
+                    img = img.resize((640, 480), Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(image=img)
+                    self.video_label.configure(image=photo, text="")
+                    self.video_label.image = photo
+                except Exception as e:
+                    print("Video update error:", e)
+            
+            # Update gesture status badge
+            self.gesture_status.configure(
+                text=self.shared_data['gesture_name'],
+                fg_color=self.shared_data['gesture_color']
+            )
+            
+            # Update metrics
+            self.metric_widgets['volume'].configure(
+                text=f"{self.shared_data['volume_percent']}%")
+            self.metric_widgets['distance'].configure(
+                text=f"{self.shared_data['finger_distance']}px")
+            self.metric_widgets['accuracy'].configure(
+                text=f"{self.shared_data['accuracy']}%")
+            self.metric_widgets['time'].configure(
+                text=f"{self.shared_data['response_time']}ms")
+            
+            # Update gesture cards
+            self.update_gesture_cards_status()
+            
+            # Update graphs (only if we're on the analytics tab for performance)
+            current_tab = self.tabview.get()
+            if current_tab == "📊 Analytics":
+                self.draw_volume_graph()
+                self.draw_performance_graphs()
+            
+            # Schedule next update
+            self.root.after(33, self.update_ui)
+    
+    def update_gesture_cards_status(self):
+        """Update the gesture recognition cards"""
+        fingers = self.shared_data['fingers_extended']
+        distance = self.shared_data['finger_distance']
         
-        # Update the graph
-        self.draw_volume_graph()
-        print(f"Test data added. Volume history now has {len(self.volume_history)} points")
+        # Reset all to inactive
+        for card in self.gesture_cards.values():
+            card.indicator.configure(fg_color="#d0d0d0")
+            card.status_label.configure(text="Inactive", text_color="#999999")
+        
+        # Set active card based on current gesture
+        if fingers >= 3 and distance > 100:
+            card = self.gesture_cards['open']
+            card.indicator.configure(fg_color="#4CAF50")
+            card.status_label.configure(text="Active", text_color="#4CAF50")
+        elif distance < 30:
+            card = self.gesture_cards['closed']
+            card.indicator.configure(fg_color=self.primary_color)
+            card.status_label.configure(text="Active", text_color=self.primary_color)
+        elif distance < 60:
+            card = self.gesture_cards['pinch']
+            card.indicator.configure(fg_color=self.primary_color)
+            card.status_label.configure(text="Active", text_color=self.primary_color)
     
     def run_gesture_detection(self):
-        """Run gesture detection loop"""
-        # CRITICAL: Initialize COM for this thread before using audio controls
-        # COM (Component Object Model) must be initialized in each thread that uses it
-        import comtypes
+        """Background thread for gesture detection - FIXED VOLUME CONTROL"""
         comtypes.CoInitialize()
         
         try:
             mp_hands = mp.solutions.hands
             mp_drawing = mp.solutions.drawing_utils
             
-            # Initialize audio control - now COM is properly initialized
+            # Initialize audio volume control
             devices = AudioUtilities.GetSpeakers()
             interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
             volume = cast(interface, POINTER(IAudioEndpointVolume))
-            vol_min, vol_max = volume.GetVolumeRange()[:2]
-        
+            
+            # Get actual volume range
+            vol_range = volume.GetVolumeRange()
+            self.vol_min = vol_range[0]
+            self.vol_max = vol_range[1]
+            print(f"Volume range: {self.vol_min}dB to {self.vol_max}dB")
+            
             cap = cv2.VideoCapture(0)
             
             with mp_hands.Hands(static_image_mode=False,
-                            max_num_hands=1,
-                            min_detection_confidence=0.7,
-                            min_tracking_confidence=0.7) as hands:
+                               max_num_hands=1,
+                               min_detection_confidence=0.7,
+                               min_tracking_confidence=0.7) as hands:
                 
                 frame_count = 0
                 successful_detections = 0
@@ -542,7 +908,7 @@ class GestureControlApp:
                     
                     start_time = time.time()
                     results = hands.process(rgb_frame)
-                    process_time = (time.time() - start_time) * 1000  # Convert to ms
+                    process_time = (time.time() - start_time) * 1000
                     
                     frame_count += 1
                     
@@ -551,247 +917,138 @@ class GestureControlApp:
                         
                         for hand_landmarks in results.multi_hand_landmarks:
                             mp_drawing.draw_landmarks(frame, hand_landmarks, 
-                                                    mp_hands.HAND_CONNECTIONS)
+                                                     mp_hands.HAND_CONNECTIONS)
                             
-                            # Get thumb and index finger positions
-                            x1 = int(hand_landmarks.landmark[4].x * w)
-                            y1 = int(hand_landmarks.landmark[4].y * h)
-                            x2 = int(hand_landmarks.landmark[8].x * w)
-                            y2 = int(hand_landmarks.landmark[8].y * h)
+                            landmarks = hand_landmarks.landmark
                             
-                            # Draw circles and line
+                            # Get finger positions
+                            x1 = int(landmarks[4].x * w)  # Thumb tip
+                            y1 = int(landmarks[4].y * h)
+                            x2 = int(landmarks[8].x * w)  # Index finger tip
+                            y2 = int(landmarks[8].y * h)
+                            
+                            # Get other finger positions for gesture recognition
+                            y_middle = int(landmarks[12].y * h)
+                            y_ring = int(landmarks[16].y * h)
+                            y_pinky = int(landmarks[20].y * h)
+                            wrist_y = int(landmarks[0].y * h)
+                            
+                            # Draw markers and line
                             cv2.circle(frame, (x1, y1), 12, (255, 0, 255), -1)
                             cv2.circle(frame, (x2, y2), 12, (255, 0, 255), -1)
                             cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
                             
-                            # Calculate distance
+                            # Calculate distance between thumb and index finger
                             length = math.hypot(x2 - x1, y2 - y1)
                             
-                            # Update volume
-                            vol = np.interp(length, [30, 200], [vol_min, vol_max])
-                            volume.SetMasterVolumeLevel(vol, None)
+                            # Count extended fingers
+                            fingers_extended = 0
+                            finger_threshold = 30  # pixels above wrist
+                            if y2 < wrist_y - finger_threshold: fingers_extended += 1
+                            if y_middle < wrist_y - finger_threshold: fingers_extended += 1
+                            if y_ring < wrist_y - finger_threshold: fingers_extended += 1
+                            if y_pinky < wrist_y - finger_threshold: fingers_extended += 1
                             
-                            # Update metrics
-                            volume_percent = int(np.interp(length, [30, 200], [0, 100]))
-                            accuracy = int((successful_detections / frame_count) * 100)
+                            # FIXED: SMOOTH VOLUME CONTROL - No sudden jumps to 100%
+                            min_distance = 30    # Minimum distance for 0% volume
+                            max_distance = 200   # Maximum distance for 100% volume
                             
-                            self.metrics['current_volume'] = volume_percent
-                            self.metrics['finger_distance'] = int(length / 10)  # Convert to approximate mm
-                            self.metrics['accuracy'] = accuracy
-                            self.metrics['response_time'] = int(process_time)
+                            # Clamp the distance within reasonable bounds
+                            clamped_distance = max(min_distance, min(length, max_distance))
                             
-                            # Update UI metrics
-                            self.root.after(0, self.update_metrics)
+                            # Calculate target volume percentage based on distance
+                            target_volume_percent = int(np.interp(clamped_distance, 
+                                                                [min_distance, max_distance], 
+                                                                [0, 100]))
                             
-                            # Determine gesture
-                            if length > 100:
-                                gesture = "Open Hand"
-                                color = "#4CAF50"
-                            elif 60 < length <= 100:
-                                gesture = "Half Open"
-                                color = "#FF9800"
+                            # Convert to dB volume level for system
+                            target_vol_db = np.interp(target_volume_percent, [0, 100], 
+                                                    [self.vol_min, self.vol_max])
+                            
+                            # Determine gesture type for display purposes only
+                            # Volume is now solely controlled by distance, not gesture type
+                            if fingers_extended >= 3 and length > 100:
+                                gesture_name = "Open Hand"
+                                gesture_color = "#4CAF50"
+                                # Open hand doesn't force 100% volume anymore
+                                # It just allows reaching 100% through distance
+                            elif fingers_extended <= 1 or length < 60:
+                                gesture_name = "Pinch Gesture"
+                                gesture_color = self.primary_color
+                                # Pinch gesture doesn't limit volume to low levels
+                                # It allows full range control based on distance
                             else:
-                                gesture = "Pinch Gesture"
-                                color = "#FF5722"
+                                gesture_name = "Half Open"
+                                gesture_color = self.primary_light
                             
-                            self.root.after(0, lambda g=gesture, c=color: 
-                                        self.gesture_status.configure(text=g, fg_color=c))
+                            # FIXED: Apply smoothing to prevent sudden jumps
+                            current_volume_percent = self.shared_data.get('volume_percent', 0)
                             
-                            # Draw volume bar
-                            vol_bar = int(np.interp(length, [30, 200], [400, 150]))
+                            # Smooth transition between current and target volume
+                            if abs(current_volume_percent - target_volume_percent) > 5:  # Only apply smoothing for significant changes
+                                smoothed_volume = int(current_volume_percent + 
+                                                    (target_volume_percent - current_volume_percent) * self.smoothing_factor)
+                            else:
+                                smoothed_volume = target_volume_percent
+                            
+                            # Ensure volume stays within bounds
+                            final_volume_percent = max(0, min(100, smoothed_volume))
+                            final_vol_db = np.interp(final_volume_percent, [0, 100], 
+                                                   [self.vol_min, self.vol_max])
+                            
+                            # Set system volume only if changed significantly
+                            current_vol = volume.GetMasterVolumeLevel()
+                            if abs(current_vol - final_vol_db) > 0.5:  # Reduced threshold for smoother changes
+                                volume.SetMasterVolumeLevel(final_vol_db, None)
+                            
+                            # Draw volume bar on frame
+                            vol_bar_height = int(np.interp(final_volume_percent, [0, 100], [400, 150]))
                             cv2.rectangle(frame, (50, 150), (85, 400), (0, 255, 0), 3)
-                            cv2.rectangle(frame, (50, vol_bar), (85, 400), (0, 255, 0), -1)
-                            cv2.putText(frame, f'{volume_percent}%', (40, 430), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 3)
-                    
-                    # Convert frame for display
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    img = Image.fromarray(frame_rgb)
-                    img = img.resize((640, 480), Image.Resampling.LANCZOS)
-                    photo = ImageTk.PhotoImage(image=img)
-                    
-                    # Update video display
-                    self.root.after(0, lambda p=photo: self.update_video(p))
-                    
-                    time.sleep(0.03)  # ~30 FPS
-                
-                cap.release()
-            
-        finally:
-            # IMPORTANT: Always uninitialize COM when done
-            # This properly cleans up Windows resources
-            comtypes.CoUninitialize()
-    
-    def update_video(self, photo):
-        """Update video display in UI"""
-        self.video_label.configure(image=photo)
-        self.video_label.image = photo  # Keep a reference
-    
-    def update_metrics(self):
-        """Update metric displays"""
-        self.metric_labels['current_volume'].configure(
-            text=f"{self.metrics['current_volume']}%")
-        self.metric_labels['finger_distance'].configure(
-            text=f"{self.metrics['finger_distance']}mm")
-        self.metric_labels['accuracy'].configure(
-            text=f"{self.metrics['accuracy']}%")
-        self.metric_labels['response_time'].configure(
-            text=f"{self.metrics['response_time']}ms")
-    
-    def update_graph_display(self):
-        """Wrapper function to safely update the graph from any thread"""
-        try:
-            # Update status label
-            data_count = len(self.volume_history)
-            self.graph_status_label.configure(
-                text=f"Data points: {data_count} | Last update: {time.strftime('%H:%M:%S')}"
-            )
-            self.draw_volume_graph()
-        except Exception as e:
-            print(f"Error updating graph display: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def draw_volume_graph(self):
-        """Draw the volume history graph on the canvas"""
-        try:
-            # Clear the entire canvas
-            self.graph_canvas.delete("all")
-            
-            # Get canvas dimensions
-            canvas_width = self.graph_canvas.winfo_width()
-            canvas_height = self.graph_canvas.winfo_height()
-            
-            # Use minimum dimensions if canvas not fully initialized
-            if canvas_width < 100:
-                canvas_width = 800
-            if canvas_height < 50:
-                canvas_height = 90
-            
-            # Calculate padding
-            padding_left = 40
-            padding_right = 15
-            padding_top = 15
-            padding_bottom = 15
-            
-            graph_width = canvas_width - padding_left - padding_right
-            graph_height = canvas_height - padding_top - padding_bottom
-            
-            # Draw white background
-            self.graph_canvas.create_rectangle(
-                0, 0, canvas_width, canvas_height,
-                fill="white", outline=""
-            )
-            
-            # Draw grid lines and labels
-            for i in range(0, 101, 25):
-                y_pos = padding_top + graph_height - (i / 100 * graph_height)
-                # Horizontal grid line
-                self.graph_canvas.create_line(
-                    padding_left, y_pos, 
-                    canvas_width - padding_right, y_pos, 
-                    fill="#e8e8e8", width=1
-                )
-                # Percentage label
-                self.graph_canvas.create_text(
-                    padding_left - 8, y_pos, 
-                    text=f"{i}%", 
-                    anchor="e", fill="#888888", 
-                    font=("Arial", 8)
-                )
-            
-            # Draw border
-            self.graph_canvas.create_rectangle(
-                padding_left, padding_top,
-                canvas_width - padding_right, canvas_height - padding_bottom,
-                outline="#d0d0d0", width=1
-            )
-            
-            # Get the data
-            data_count = len(self.volume_history)
-            
-            if data_count >= 1:
-                # We have data to display
-                points = []
-                
-                for i, vol in enumerate(self.volume_history):
-                    # Calculate x position - spread points across the width
-                    if data_count == 1:
-                        x = padding_left + graph_width / 2
+                            cv2.rectangle(frame, (50, vol_bar_height), (85, 400), (0, 255, 0), -1)
+                            cv2.putText(frame, f'{final_volume_percent}%', (40, 430), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 3)
+                            
+                            # Update shared data
+                            self.shared_data['volume_percent'] = final_volume_percent
+                            self.shared_data['finger_distance'] = int(length)
+                            self.shared_data['gesture_name'] = gesture_name
+                            self.shared_data['gesture_color'] = gesture_color
+                            self.shared_data['accuracy'] = int((successful_detections / frame_count) * 100)
+                            self.shared_data['response_time'] = int(process_time)
+                            self.shared_data['fingers_extended'] = fingers_extended
+                            
+                            # Add to graph history
+                            self.volume_history.append(final_volume_percent)
+                            self.response_time_history.append(process_time)
+                            self.accuracy_history.append(self.shared_data['accuracy'])
+                            
+                            # Update statistics
+                            self.update_statistics(frame_count, successful_detections)
+                            
                     else:
-                        x = padding_left + (i / (data_count - 1)) * graph_width
+                        # No hand detected
+                        self.shared_data['gesture_name'] = "No Hand Detected"
+                        self.shared_data['gesture_color'] = "#999999"
+                        # Still update accuracy and response time
+                        self.shared_data['accuracy'] = int((successful_detections / frame_count) * 100)
+                        self.shared_data['response_time'] = int(process_time)
+                        self.response_time_history.append(process_time)
+                        self.accuracy_history.append(self.shared_data['accuracy'])
                     
-                    # Calculate y position based on volume (0-100%)
-                    y = padding_top + graph_height - (vol / 100 * graph_height)
-                    points.append((x, y))
-                
-                if data_count >= 2:
-                    # Draw filled area under the line
-                    fill_coords = []
-                    for x, y in points:
-                        fill_coords.extend([x, y])
+                    # Store current frame
+                    self.current_frame = frame.copy()
                     
-                    # Close the polygon at the bottom
-                    fill_coords.extend([points[-1][0], canvas_height - padding_bottom])
-                    fill_coords.extend([points[0][0], canvas_height - padding_bottom])
-                    
-                    self.graph_canvas.create_polygon(
-                        fill_coords,
-                        fill="#FFE0DD",
-                        outline="",
-                        smooth=False
-                    )
-                    
-                    # Draw the line
-                    line_coords = []
-                    for x, y in points:
-                        line_coords.extend([x, y])
-                    
-                    self.graph_canvas.create_line(
-                        line_coords,
-                        fill="#FF5722",
-                        width=3,
-                        smooth=True
-                    )
-                
-                # Draw current point marker (last point)
-                last_x, last_y = points[-1]
-                self.graph_canvas.create_oval(
-                    last_x - 6, last_y - 6,
-                    last_x + 6, last_y + 6,
-                    fill="#FF5722",
-                    outline="white",
-                    width=2
-                )
-                
-                # Show current volume value
-                current_vol = int(self.volume_history[-1])
-                self.graph_canvas.create_text(
-                    last_x, last_y - 18,
-                    text=f"{current_vol}%",
-                    fill="#FF5722",
-                    font=("Arial", 11, "bold")
-                )
-            else:
-                # No data yet - show waiting message
-                self.graph_canvas.create_text(
-                    canvas_width // 2,
-                    canvas_height // 2,
-                    text="Move your hand to see the graph",
-                    fill="#aaaaaa",
-                    font=("Arial", 12)
-                )
+                    # Control frame rate
+                    time.sleep(0.03)
             
+            cap.release()
+        
         except Exception as e:
-            print(f"Graph error: {e}")
+            print(f"Gesture detection error: {e}")
             import traceback
             traceback.print_exc()
-    
-    def update_gesture_cards(self, current_gesture):
-        """Update the gesture recognition cards to show which gesture is active"""
-        # This would update the gesture cards in the right panel
-        # For now, the gesture status label shows the current gesture
-        pass
+        finally:
+            comtypes.CoUninitialize()
 
 # Run the application
 if __name__ == "__main__":
